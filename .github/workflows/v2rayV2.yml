@@ -35,16 +35,11 @@ jobs:
           cat /tmp/keys.txt
           echo ""
           
-          # Extract keys using multiple methods to ensure we get them
-          PRIVATE_KEY=$(cat /tmp/keys.txt | grep -i "private key" | awk '{print $NF}')
-          if [ -z "$PRIVATE_KEY" ]; then
-            PRIVATE_KEY=$(cat /tmp/keys.txt | grep "Private" | cut -d: -f2 | tr -d ' ')
-          fi
-          
-          PUBLIC_KEY=$(cat /tmp/keys.txt | grep -i "public key" | awk '{print $NF}')
-          if [ -z "$PUBLIC_KEY" ]; then
-            PUBLIC_KEY=$(cat /tmp/keys.txt | grep "Public" | cut -d: -f2 | tr -d ' ')
-          fi
+          # Extract keys - NEW XRAY FORMAT
+          # PrivateKey: xxx
+          # Password: yyy (this is actually the public key!)
+          PRIVATE_KEY=$(grep "PrivateKey:" /tmp/keys.txt | cut -d: -f2 | tr -d ' ')
+          PUBLIC_KEY=$(grep "Password:" /tmp/keys.txt | cut -d: -f2 | tr -d ' ')
           
           # Generate Short ID
           SHORT_ID=$(openssl rand -hex 8)
