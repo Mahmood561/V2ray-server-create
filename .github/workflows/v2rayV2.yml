@@ -25,35 +25,38 @@ jobs:
           UUID=$(cat /proc/sys/kernel/random/uuid)
           UUID_ANDROID=$(cat /proc/sys/kernel/random/uuid)
           
-          # Generate x25519 keys and capture output properly
+          # Generate x25519 keys
           xray x25519 > /tmp/keys.txt 2>&1
           
           echo "=== Raw key output ==="
           cat /tmp/keys.txt
           echo "======================"
           
-          # Extract keys with better patterns
+          # Extract keys - try multiple methods
           PRIVATE_KEY=$(cat /tmp/keys.txt | grep -i "private key" | awk '{print $NF}')
           PUBLIC_KEY=$(cat /tmp/keys.txt | grep -i "public key" | awk '{print $NF}')
           
-          # Fallback: try alternative extraction method
+          # Fallback extraction
           if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
             PRIVATE_KEY=$(cat /tmp/keys.txt | grep -oE '[A-Za-z0-9_-]{43,44}' | sed -n '1p')
             PUBLIC_KEY=$(cat /tmp/keys.txt | grep -oE '[A-Za-z0-9_-]{43,44}' | sed -n '2p')
           fi
           
-          # Generate shortId
           SHORT_ID=$(openssl rand -hex 8)
           
-          # Validate keys are not empty
+          # Validate
           if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
             echo "❌ ERROR: Failed to generate keys!"
-            echo "Private Key: '$PRIVATE_KEY'"
-            echo "Public Key: '$PUBLIC_KEY'"
             exit 1
           fi
           
-          # Export to environment
+          # Save to files for reliable access
+          echo "$PRIVATE_KEY" > /tmp/private.key
+          echo "$PUBLIC_KEY" > /tmp/public.key
+          echo "$UUID" > /tmp/uuid.txt
+          echo "$UUID_ANDROID" > /tmp/uuid_android.txt
+          echo "$SHORT_ID" > /tmp/short.id
+          
           echo "PRIVATE_KEY=$PRIVATE_KEY" >> $GITHUB_ENV
           echo "PUBLIC_KEY=$PUBLIC_KEY" >> $GITHUB_ENV
           echo "UUID=$UUID" >> $GITHUB_ENV
@@ -62,7 +65,6 @@ jobs:
           
           echo "✅ PC UUID: $UUID"
           echo "✅ Android UUID: $UUID_ANDROID"
-          echo "✅ Private Key: $PRIVATE_KEY"
           echo "✅ Public Key: $PUBLIC_KEY"
           echo "✅ Short ID: $SHORT_ID"
 
@@ -75,62 +77,108 @@ jobs:
 
       - name: Create Dual Protocol Config
         run: |
-          # Verify environment variables are set
-          echo "Verifying keys..."
-          echo "Private Key length: ${#PRIVATE_KEY}"
-          echo "Public Key length: ${#PUBLIC_KEY}"
+          # Read from files to avoid variable expansion issues
+          PRIVATE_KEY=$(cat /tmp/private.key)
+          PUBLIC_KEY=$(cat /tmp/public.key)
+          UUID=$(cat /tmp/uuid.txt)
+          UUID_ANDROID=$(cat /tmp/uuid_android.txt)
+          SHORT_ID=$(cat /tmp/short.id)
           
-          if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
-            echo "❌ Keys are empty!"
+          echo "Creating config with:"
+          echo "UUID: $UUID"
+          echo "UUID_ANDROID: $UUID_ANDROID"
+          echo "SHORT_ID: $SHORT_ID"
+          echo "Keys length check: PRIVATE=${#PRIVATE_KEY} PUBLIC=${#PUBLIC_KEY}"
+          
+          cat > /tmp/xray/config.json <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$UUID",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.microsoft.com:443",
+          "xver": 0,
+          "serverNames": [
+            "www.microsoft.com",
+            "microsoft.com"
+          ],
+          "privateKey": "$PRIVATE_KEY",
+          "shortIds": [
+            "$SHORT_ID",
+            ""
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 8080,
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "$UUID_ANDROID",
+            "alterId": 0
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/ray"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+EOF
+          
+          echo "✅ Config created"
+          echo "=== Verifying config ==="
+          cat /tmp/xray/config.json
+          echo "========================"
+
+      - name: Validate Config
+        run: |
+          echo "Testing Xray config..."
+          xray test -c /tmp/xray/config.json
+          if [ $? -eq 0 ]; then
+            echo "✅ Config is valid!"
+          else
+            echo "❌ Config validation failed!"
             exit 1
           fi
-          
-          cat > /tmp/xray/config.json << ENDCONFIG
-          {
-            "log": {"loglevel": "warning"},
-            "inbounds": [
-              {
-                "listen": "0.0.0.0",
-                "port": 443,
-                "protocol": "vless",
-                "settings": {
-                  "clients": [{"id": "${UUID}", "flow": "xtls-rprx-vision"}],
-                  "decryption": "none"
-                },
-                "streamSettings": {
-                  "network": "tcp",
-                  "security": "reality",
-                  "realitySettings": {
-                    "show": false,
-                    "dest": "www.microsoft.com:443",
-                    "xver": 0,
-                    "serverNames": ["www.microsoft.com", "microsoft.com"],
-                    "privateKey": "${PRIVATE_KEY}",
-                    "shortIds": ["${SHORT_ID}", ""]
-                  }
-                },
-                "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
-              },
-              {
-                "listen": "127.0.0.1",
-                "port": 8080,
-                "protocol": "vmess",
-                "settings": {
-                  "clients": [{"id": "${UUID_ANDROID}", "alterId": 0}]
-                },
-                "streamSettings": {
-                  "network": "ws",
-                  "wsSettings": {"path": "/ray"}
-                }
-              }
-            ],
-            "outbounds": [{"protocol": "freedom"}]
-          }
-          ENDCONFIG
-          
-          echo "✅ Dual protocol config created"
-          echo "=== Config verification ==="
-          cat /tmp/xray/config.json | grep -A2 "privateKey"
 
       - name: Start Xray
         run: |
@@ -138,14 +186,32 @@ jobs:
           sudo nohup xray run -c config.json > xray.log 2>&1 &
           XRAY_PID=$!
           echo "XRAY_PID=$XRAY_PID" >> $GITHUB_ENV
-          sleep 5
+          sleep 8
           
-          if sudo ps -p $XRAY_PID > /dev/null && sudo ss -tlnp | grep :443; then
-            echo "✅ Xray started (PID: $XRAY_PID)"
+          echo "=== Xray Log ==="
+          cat xray.log
+          echo "================"
+          
+          if sudo ps -p $XRAY_PID > /dev/null; then
+            echo "✅ Xray process running (PID: $XRAY_PID)"
           else
-            echo "❌ Xray failed to start!"
-            cat /tmp/xray/xray.log
+            echo "❌ Xray process died!"
+            cat xray.log
             exit 1
+          fi
+          
+          if sudo ss -tlnp | grep :443; then
+            echo "✅ Port 443 listening"
+          else
+            echo "❌ Port 443 not listening!"
+            sudo ss -tlnp
+            exit 1
+          fi
+          
+          if sudo ss -tlnp | grep :8080; then
+            echo "✅ Port 8080 listening"
+          else
+            echo "❌ Port 8080 not listening!"
           fi
 
       - name: Install Cloudflared
@@ -216,9 +282,13 @@ jobs:
 
       - name: Display Connection Info
         run: |
-          # Verify keys one more time
+          PUBLIC_KEY=$(cat /tmp/public.key)
+          UUID=$(cat /tmp/uuid.txt)
+          UUID_ANDROID=$(cat /tmp/uuid_android.txt)
+          SHORT_ID=$(cat /tmp/short.id)
+          
           if [ -z "$PUBLIC_KEY" ]; then
-            echo "❌ PUBLIC_KEY is empty! Cannot generate connection info."
+            echo "❌ PUBLIC_KEY is empty!"
             exit 1
           fi
           
@@ -307,27 +377,38 @@ jobs:
           
           for i in {1..2160}; do
             # Check Xray
-            sudo ps -p $XRAY_PID > /dev/null 2>&1 || { echo "❌ Xray died"; cat /tmp/xray/xray.log; exit 1; }
+            if ! sudo ps -p $XRAY_PID > /dev/null 2>&1; then
+              echo "❌ Xray died at minute $((i * 10 / 60))"
+              cat /tmp/xray/xray.log
+              exit 1
+            fi
             
             # Check Reality tunnel
-            ps -p $CF_REALITY_PID > /dev/null 2>&1 || {
+            if ! ps -p $CF_REALITY_PID > /dev/null 2>&1; then
               echo "🔄 Restarting Reality tunnel..."
               nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_REALITY }}" > /tmp/cf-reality.log 2>&1 &
               CF_REALITY_PID=$!
+              echo "CF_REALITY_PID=$CF_REALITY_PID" >> $GITHUB_ENV
               sleep 10
-            }
+            fi
             
             # Check VMess tunnel
-            ps -p $CF_VMESS_PID > /dev/null 2>&1 || {
+            if ! ps -p $CF_VMESS_PID > /dev/null 2>&1; then
               echo "🔄 Restarting VMess tunnel..."
               nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_VMESS }}" > /tmp/cf-vmess.log 2>&1 &
               CF_VMESS_PID=$!
+              echo "CF_VMESS_PID=$CF_VMESS_PID" >> $GITHUB_ENV
               sleep 10
-            }
+            fi
             
-            [ $((i % 30)) -eq 0 ] && echo "[$(date '+%H:%M:%S')] ✅ All running | $((i * 10 / 60))min"
+            if [ $((i % 30)) -eq 0 ]; then
+              echo "[$(date '+%H:%M:%S')] ✅ All running | $((i * 10 / 60))min"
+            fi
+            
             sleep 10
           done
+          
+          echo "⏰ 6 hours completed. Shutting down gracefully..."
 
       - name: Cleanup
         if: always()
@@ -335,3 +416,4 @@ jobs:
           sudo kill $XRAY_PID 2>/dev/null || true
           kill $CF_REALITY_PID 2>/dev/null || true
           kill $CF_VMESS_PID 2>/dev/null || true
+          echo "🧹 Cleanup completed"
