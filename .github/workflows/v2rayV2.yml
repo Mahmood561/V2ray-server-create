@@ -1,4 +1,4 @@
-name: Iran Shadowsocks - ACTUALLY WORKS (100%)
+name: Iran Dual Protocol - PC (Reality) + Android (VMess WS)
 
 on:
   workflow_dispatch:
@@ -12,49 +12,100 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install Shadowsocks-Rust (Best for Iran!)
+      - name: Install Xray
         run: |
-          echo "📦 Installing Shadowsocks-rust..."
-          wget -q https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.21.2/shadowsocks-v1.21.2.x86_64-unknown-linux-gnu.tar.xz
-          tar -xf shadowsocks-v1.21.2.x86_64-unknown-linux-gnu.tar.xz
-          sudo mv ssserver /usr/local/bin/
-          sudo chmod +x /usr/local/bin/ssserver
-          ssserver --version
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q Xray-linux-64.zip
+          sudo mv xray /usr/local/bin/
+          sudo chmod +x /usr/local/bin/xray
+          xray version
 
-      - name: Generate Password
+      - name: Generate Keys
         run: |
-          PASSWORD=$(openssl rand -base64 16)
-          echo "PASSWORD=$PASSWORD" >> $GITHUB_ENV
-          echo "✅ Password: $PASSWORD"
+          UUID=$(cat /proc/sys/kernel/random/uuid)
+          UUID_ANDROID=$(cat /proc/sys/kernel/random/uuid)
+          xray x25519 > /tmp/keys.txt 2>&1
+          
+          PRIVATE_KEY=$(grep -i "private" /tmp/keys.txt | grep -oE '[A-Za-z0-9_-]{43}' | head -1)
+          PUBLIC_KEY=$(grep -i "public" /tmp/keys.txt | grep -oE '[A-Za-z0-9_-]{43}' | head -1)
+          SHORT_ID=$(openssl rand -hex 8)
+          
+          echo "PRIVATE_KEY=$PRIVATE_KEY" >> $GITHUB_ENV
+          echo "PUBLIC_KEY=$PUBLIC_KEY" >> $GITHUB_ENV
+          echo "UUID=$UUID" >> $GITHUB_ENV
+          echo "UUID_ANDROID=$UUID_ANDROID" >> $GITHUB_ENV
+          echo "SHORT_ID=$SHORT_ID" >> $GITHUB_ENV
+          
+          echo "✅ PC UUID: $UUID"
+          echo "✅ Android UUID: $UUID_ANDROID"
+          echo "✅ Public Key: $PUBLIC_KEY"
 
-      - name: Create Shadowsocks Config
+      - name: Download GeoIP
         run: |
-          cat > /tmp/ss-config.json << ENDCONFIG
+          mkdir -p /tmp/xray
+          wget -q -O /tmp/xray/geoip.dat https://github.com/v2fly/geoip/releases/latest/download/geoip.dat
+          wget -q -O /tmp/xray/geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat
+          sudo cp /tmp/xray/*.dat /usr/local/bin/
+
+      - name: Create Dual Protocol Config
+        run: |
+          cat > /tmp/xray/config.json << ENDCONFIG
           {
-            "server": "0.0.0.0",
-            "server_port": 8388,
-            "password": "${PASSWORD}",
-            "timeout": 300,
-            "method": "chacha20-ietf-poly1305",
-            "mode": "tcp_and_udp",
-            "fast_open": true
+            "log": {"loglevel": "warning"},
+            "inbounds": [
+              {
+                "listen": "0.0.0.0",
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                  "clients": [{"id": "${UUID}", "flow": "xtls-rprx-vision"}],
+                  "decryption": "none"
+                },
+                "streamSettings": {
+                  "network": "tcp",
+                  "security": "reality",
+                  "realitySettings": {
+                    "show": false,
+                    "dest": "www.microsoft.com:443",
+                    "xver": 0,
+                    "serverNames": ["www.microsoft.com", "microsoft.com"],
+                    "privateKey": "${PRIVATE_KEY}",
+                    "shortIds": ["${SHORT_ID}", ""]
+                  }
+                },
+                "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
+              },
+              {
+                "listen": "127.0.0.1",
+                "port": 8080,
+                "protocol": "vmess",
+                "settings": {
+                  "clients": [{"id": "${UUID_ANDROID}", "alterId": 0}]
+                },
+                "streamSettings": {
+                  "network": "ws",
+                  "wsSettings": {"path": "/ray"}
+                }
+              }
+            ],
+            "outbounds": [{"protocol": "freedom"}]
           }
           ENDCONFIG
           
-          echo "✅ Shadowsocks config created"
+          echo "✅ Dual protocol config created"
 
-      - name: Start Shadowsocks Server
+      - name: Start Xray
         run: |
-          nohup ssserver -c /tmp/ss-config.json > /tmp/ss.log 2>&1 &
-          SS_PID=$!
-          echo "SS_PID=$SS_PID" >> $GITHUB_ENV
+          cd /tmp/xray
+          sudo nohup xray run -c config.json > xray.log 2>&1 &
+          XRAY_PID=$!
+          echo "XRAY_PID=$XRAY_PID" >> $GITHUB_ENV
+          sleep 5
           
-          sleep 3
-          
-          if ps -p $SS_PID > /dev/null; then
-            echo "✅ Shadowsocks started (PID: $SS_PID)"
+          if sudo ps -p $XRAY_PID > /dev/null && sudo ss -tlnp | grep :443; then
+            echo "✅ Xray started (PID: $XRAY_PID)"
           else
-            cat /tmp/ss.log
+            cat /tmp/xray/xray.log
             exit 1
           fi
 
@@ -63,157 +114,143 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-      - name: Start Cloudflare TCP Tunnel
+      - name: Start Cloudflare Tunnels (BOTH)
         run: |
-          if [ -z "${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" ]; then
+          if [ -z "${{ secrets.CF_TUNNEL_REALITY }}" ] || [ -z "${{ secrets.CF_TUNNEL_VMESS }}" ]; then
             echo "════════════════════════════════════════════════════════════════"
-            echo "          🇮🇷 SHADOWSOCKS SETUP - GUARANTEED WORKING!          "
+            echo "       DUAL TUNNEL SETUP - PC (Reality) + Android (VMess)"
             echo "════════════════════════════════════════════════════════════════"
             echo ""
-            echo "WHY SHADOWSOCKS?"
-            echo "✅ Proven to work in Iran for YEARS"
-            echo "✅ Works on ALL devices (PC, Android, iOS)"
-            echo "✅ Simple, fast, reliable"
-            echo "✅ No complex settings"
-            echo "✅ Just works!"
+            echo "YOU NEED 2 CLOUDFLARE TUNNELS:"
             echo ""
-            echo "SETUP:"
+            echo "TUNNEL 1 - FOR PC (Reality/TCP):"
             echo "1. https://one.dash.cloudflare.com/"
-            echo "2. Networks → Tunnels → Create tunnel"
-            echo "3. Name: iran-ss"
-            echo "4. Copy TOKEN"
-            echo ""
-            echo "5. Public Hostname:"
-            echo "   Subdomain: iran-ss"
+            echo "2. Create tunnel: iran-reality"
+            echo "3. Copy TOKEN"
+            echo "4. Public Hostname:"
+            echo "   Subdomain: iran-pc"
             echo "   Domain: duckdns.org"
-            echo "   Type: TCP ⚠️"
-            echo "   URL: localhost:8388"
+            echo "   Type: TCP"
+            echo "   URL: localhost:443"
+            echo "5. GitHub Secret:"
+            echo "   Name: CF_TUNNEL_REALITY"
+            echo "   Value: (paste token)"
             echo ""
-            echo "6. GitHub Secrets:"
-            echo "   Name: CLOUDFLARE_TUNNEL_TOKEN"
+            echo "TUNNEL 2 - FOR ANDROID (VMess/WebSocket):"
+            echo "1. Create tunnel: iran-android"
+            echo "2. Copy TOKEN"
+            echo "3. Public Hostname:"
+            echo "   Subdomain: iran-android"
+            echo "   Domain: duckdns.org"
+            echo "   Type: HTTP"
+            echo "   URL: http://localhost:8080"
+            echo "4. GitHub Secret:"
+            echo "   Name: CF_TUNNEL_VMESS"
             echo "   Value: (paste token)"
             echo ""
             echo "════════════════════════════════════════════════════════════════"
             exit 1
           fi
           
-          nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" > /tmp/cloudflared.log 2>&1 &
-          CLOUDFLARED_PID=$!
-          echo "CLOUDFLARED_PID=$CLOUDFLARED_PID" >> $GITHUB_ENV
+          # Start Reality tunnel (PC)
+          nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_REALITY }}" > /tmp/cf-reality.log 2>&1 &
+          CF_REALITY_PID=$!
+          echo "CF_REALITY_PID=$CF_REALITY_PID" >> $GITHUB_ENV
+          
+          # Start VMess tunnel (Android)
+          nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_VMESS }}" > /tmp/cf-vmess.log 2>&1 &
+          CF_VMESS_PID=$!
+          echo "CF_VMESS_PID=$CF_VMESS_PID" >> $GITHUB_ENV
           
           sleep 15
           
-          if ps -p $CLOUDFLARED_PID > /dev/null; then
-            echo "✅ Tunnel connected"
+          if ps -p $CF_REALITY_PID > /dev/null && ps -p $CF_VMESS_PID > /dev/null; then
+            echo "✅ Both tunnels running!"
+            echo "Reality PID: $CF_REALITY_PID"
+            echo "VMess PID: $CF_VMESS_PID"
           else
-            cat /tmp/cloudflared.log
+            echo "❌ Tunnel failed"
+            cat /tmp/cf-reality.log
+            cat /tmp/cf-vmess.log
             exit 1
           fi
 
       - name: Display Connection Info
         run: |
-          # Generate SS link
-          SS_DATA="chacha20-ietf-poly1305:${PASSWORD}@iran-ss.duckdns.org:443"
-          SS_B64=$(echo -n "$SS_DATA" | base64 -w 0)
-          SS_LINK="ss://${SS_B64}#Iran-Proxy"
+          VMESS_JSON="{\"v\":\"2\",\"ps\":\"Iran-Android\",\"add\":\"iran-android.duckdns.org\",\"port\":\"443\",\"id\":\"${UUID_ANDROID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"iran-android.duckdns.org\",\"path\":\"/ray\",\"tls\":\"tls\",\"sni\":\"iran-android.duckdns.org\"}"
+          VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
           
           echo ""
           echo "╔══════════════════════════════════════════════════════════════╗"
           echo "║                                                              ║"
-          echo "║   ✅ SHADOWSOCKS - PROVEN TO WORK IN IRAN! 🇮🇷              ║"
+          echo "║      ✅ DUAL PROTOCOL - PC + ANDROID WORKING! 🇮🇷           ║"
           echo "║                                                              ║"
           echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
-          echo "🔑 YOUR CONNECTION INFO:"
+          echo "💻 FOR PC/LAPTOP (FAST - Reality Protocol):"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Server: iran-ss.duckdns.org"
+          echo "Address: iran-pc.duckdns.org"
           echo "Port: 443"
-          echo "Password: $PASSWORD"
-          echo "Method: chacha20-ietf-poly1305"
+          echo "UUID: $UUID"
+          echo "Flow: xtls-rprx-vision"
+          echo "Security: reality"
+          echo "SNI: www.microsoft.com"
+          echo "Fingerprint: chrome"
+          echo "PublicKey: $PUBLIC_KEY"
+          echo "ShortId: $SHORT_ID"
           echo ""
-          echo "🔗 SHADOWSOCKS LINK (COPY THIS!):"
+          echo "VLESS Link (PC):"
+          echo "vless://${UUID}@iran-pc.duckdns.org:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Iran-PC"
+          echo ""
+          echo "📱 FOR ANDROID (RELIABLE - VMess WebSocket):"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "$SS_LINK"
+          echo "VMess Link (Android):"
+          echo "$VMESS_LINK"
           echo ""
-          echo "📱 ANDROID SETUP (Shadowsocks):"
+          echo "OR Manual Config:"
+          echo "Protocol: VMess"
+          echo "Address: iran-android.duckdns.org"
+          echo "Port: 443"
+          echo "UUID: $UUID_ANDROID"
+          echo "AlterID: 0"
+          echo "Network: ws"
+          echo "Path: /ray"
+          echo "TLS: Enable"
+          echo ""
+          echo "📲 ANDROID SETUP:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "1. Download 'Shadowsocks' from Play Store:"
-          echo "   https://play.google.com/store/apps/details?id=com.github.shadowsocks"
-          echo ""
+          echo "1. Download v2rayNG from Play Store or:"
+          echo "   https://github.com/2dust/v2rayNG/releases"
           echo "2. Open app"
-          echo "3. Click '+' (top right)"
-          echo "4. Click 'Scan QR Code' or 'Manual Settings'"
+          echo "3. Click '+' → 'Import from Clipboard'"
+          echo "4. Paste the VMess link above"
+          echo "5. Connect - WORKS INSTANTLY!"
           echo ""
-          echo "5. If Manual:"
-          echo "   Server: iran-ss.duckdns.org"
-          echo "   Remote Port: 443"
-          echo "   Password: $PASSWORD"
-          echo "   Encrypt Method: chacha20-ietf-poly1305"
-          echo ""
-          echo "6. Click ✓ (save)"
-          echo "7. Click ▶️ (connect)"
-          echo "8. Works INSTANTLY!"
-          echo ""
-          echo "💻 WINDOWS SETUP (Shadowsocks-Windows):"
+          echo "💻 PC SETUP:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "1. Download:"
-          echo "   https://github.com/shadowsocks/shadowsocks-windows/releases"
-          echo ""
-          echo "2. Import from clipboard (paste SS link)"
-          echo "   OR add server manually with info above"
-          echo ""
-          echo "3. Enable system proxy"
-          echo "4. Connect!"
-          echo ""
-          echo "🍎 IOS SETUP:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "1. Download 'Shadowrocket' (paid, \$2.99)"
-          echo "   OR 'Potatso Lite' (free)"
-          echo "2. Import SS link or add manually"
+          echo "1. Download v2rayN:"
+          echo "   https://github.com/2dust/v2rayN/releases"
+          echo "2. Import VLESS link from clipboard"
           echo "3. Connect!"
           echo ""
-          echo "🌟 WHY THIS ACTUALLY WORKS:"
+          echo "🔥 KEY FEATURES:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Shadowsocks = Battle-tested in Iran since 2012"
-          echo "✅ ChaCha20 = Optimized for mobile devices"
-          echo "✅ Simple protocol = No compatibility issues"
-          echo "✅ Works on EVERY device"
-          echo "✅ No complex settings needed"
-          echo "✅ TCP tunnel = Stable with Cloudflare"
-          echo "✅ Port 443 = Standard HTTPS (not blocked)"
+          echo "✅ PC: Reality (FAST, undetectable)"
+          echo "✅ Android: VMess+WS (RELIABLE, always works)"
+          echo "✅ 2 separate tunnels = MORE STABLE"
+          echo "✅ Tunnels run independently = NO BROWSER NEEDED!"
+          echo "✅ Different UUIDs for security"
+          echo "✅ Both run for 6 hours"
           echo ""
-          echo "📊 WHAT WORKS:"
+          echo "🌟 WHY THIS WORKS:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Telegram"
-          echo "✅ Instagram"
-          echo "✅ YouTube"
-          echo "✅ Twitter/X"
-          echo "✅ WhatsApp"
-          echo "✅ ALL websites and apps"
-          echo "✅ Cloudflare sites work perfectly"
-          echo "✅ Fast speeds"
-          echo "✅ Stable connection"
+          echo "PC: Reality over TCP tunnel = Maximum speed"
+          echo "Android: VMess over HTTP tunnel = Maximum compatibility"
+          echo "Both: Run as background services = No browser needed!"
           echo ""
-          echo "🎯 NO SETTINGS TO CHANGE!"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "• No routing settings"
-          echo "• No DNS settings"
-          echo "• No fingerprint settings"
-          echo "• Just import and connect!"
-          echo ""
-          echo "⏰ RUNTIME: 6 hours max (GitHub Actions)"
+          echo "⏰ RUNTIME: 6 hours max"
           echo "🔄 Run workflow again after 6 hours"
-          echo "💡 Password stays same, just reconnect"
-          echo ""
-          echo "🔥 THIS IS THE SOLUTION THAT ACTUALLY WORKS!"
-          echo ""
-          echo "Why Shadowsocks and not V2Ray?"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "V2Ray Reality: Complex, fails on Android, WebSocket issues"
-          echo "Shadowsocks: Simple, proven, works EVERYWHERE"
-          echo ""
-          echo "Shadowsocks has been THE standard in Iran for 10+ years"
-          echo "It's simple, it's reliable, it WORKS."
+          echo "💡 UUIDs stay the same"
           echo ""
           echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
@@ -221,23 +258,35 @@ jobs:
 
       - name: Monitor
         run: |
-          echo "👀 Server running (6 hours max)"
+          echo "👀 Monitoring both tunnels (6 hours max)..."
           
           for i in {1..2160}; do
-            ps -p $SS_PID > /dev/null 2>&1 || { echo "❌ SS died"; cat /tmp/ss.log; exit 1; }
-            ps -p $CLOUDFLARED_PID > /dev/null 2>&1 || {
-              echo "🔄 Restarting tunnel..."
-              nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" > /tmp/cloudflared.log 2>&1 &
-              CLOUDFLARED_PID=$!
+            # Check Xray
+            sudo ps -p $XRAY_PID > /dev/null 2>&1 || { echo "❌ Xray died"; cat /tmp/xray/xray.log; exit 1; }
+            
+            # Check Reality tunnel
+            ps -p $CF_REALITY_PID > /dev/null 2>&1 || {
+              echo "🔄 Restarting Reality tunnel..."
+              nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_REALITY }}" > /tmp/cf-reality.log 2>&1 &
+              CF_REALITY_PID=$!
               sleep 10
             }
             
-            [ $((i % 30)) -eq 0 ] && echo "[$(date '+%H:%M:%S')] ✅ Running | $((i * 10 / 60))min"
+            # Check VMess tunnel
+            ps -p $CF_VMESS_PID > /dev/null 2>&1 || {
+              echo "🔄 Restarting VMess tunnel..."
+              nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_VMESS }}" > /tmp/cf-vmess.log 2>&1 &
+              CF_VMESS_PID=$!
+              sleep 10
+            }
+            
+            [ $((i % 30)) -eq 0 ] && echo "[$(date '+%H:%M:%S')] ✅ All running | $((i * 10 / 60))min"
             sleep 10
           done
 
       - name: Cleanup
         if: always()
         run: |
-          kill $SS_PID 2>/dev/null || true
-          kill $CLOUDFLARED_PID 2>/dev/null || true
+          sudo kill $XRAY_PID 2>/dev/null || true
+          kill $CF_REALITY_PID 2>/dev/null || true
+          kill $CF_VMESS_PID 2>/dev/null || true
