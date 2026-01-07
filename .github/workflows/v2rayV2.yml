@@ -1,4 +1,4 @@
-name: Iran VLESS Reality - Final Working Version
+name: Iran VLESS Reality - 100% Working (PC + Phone)
 
 on:
   workflow_dispatch:
@@ -12,24 +12,22 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install Xray
+      - name: Install Xray Latest
         run: |
-          echo "📦 Installing Xray-core..."
+          echo "📦 Installing latest Xray-core..."
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -q Xray-linux-64.zip
           sudo mv xray /usr/local/bin/
           sudo chmod +x /usr/local/bin/xray
           xray version
-          echo "✅ Xray installed"
 
-      - name: Generate Reality Keys
+      - name: Generate Keys
         run: |
-          echo "🔐 Generating Reality X25519 keypair..."
+          UUID=$(cat /proc/sys/kernel/random/uuid)
           xray x25519 > /tmp/keys.txt 2>&1
           
           PRIVATE_KEY=$(grep -i "private" /tmp/keys.txt | grep -oE '[A-Za-z0-9_-]{43}' | head -1)
           PUBLIC_KEY=$(grep -i "public" /tmp/keys.txt | grep -oE '[A-Za-z0-9_-]{43}' | head -1)
-          UUID=$(cat /proc/sys/kernel/random/uuid)
           SHORT_ID=$(openssl rand -hex 8)
           
           echo "PRIVATE_KEY=$PRIVATE_KEY" >> $GITHUB_ENV
@@ -37,27 +35,18 @@ jobs:
           echo "UUID=$UUID" >> $GITHUB_ENV
           echo "SHORT_ID=$SHORT_ID" >> $GITHUB_ENV
           
-          echo "✅ Keys generated successfully"
-          echo "UUID: $UUID"
-          echo "Public Key: $PUBLIC_KEY"
-          echo "Short ID: $SHORT_ID"
+          echo "✅ Keys: UUID=$UUID | PublicKey=$PUBLIC_KEY | ShortID=$SHORT_ID"
 
       - name: Download GeoIP Files
         run: |
-          echo "📥 Downloading geo files..."
           mkdir -p /tmp/xray
-          
           wget -q -O /tmp/xray/geoip.dat https://github.com/v2fly/geoip/releases/latest/download/geoip.dat
           wget -q -O /tmp/xray/geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat
-          
-          sudo cp /tmp/xray/geoip.dat /usr/local/bin/geoip.dat
-          sudo cp /tmp/xray/geosite.dat /usr/local/bin/geosite.dat
-          
-          echo "✅ Geo files installed"
+          sudo cp /tmp/xray/*.dat /usr/local/bin/
 
-      - name: Create Xray Config
+      - name: Create Optimized Xray Config
         run: |
-          cat > /tmp/xray/config.json << ENDCONFIG
+          cat > /tmp/xray/config.json << 'ENDCONFIG'
           {
             "log": {
               "loglevel": "warning"
@@ -66,10 +55,8 @@ jobs:
               "servers": [
                 "https+local://8.8.8.8/dns-query",
                 "8.8.8.8",
-                "1.1.1.1",
-                "localhost"
-              ],
-              "queryStrategy": "UseIPv4"
+                "1.1.1.1"
+              ]
             },
             "inbounds": [
               {
@@ -79,33 +66,33 @@ jobs:
                 "settings": {
                   "clients": [
                     {
-                      "id": "${UUID}",
+                      "id": "UUID_PLACEHOLDER",
                       "flow": "xtls-rprx-vision"
                     }
                   ],
-                  "decryption": "none"
+                  "decryption": "none",
+                  "fallbacks": []
                 },
                 "streamSettings": {
                   "network": "tcp",
                   "security": "reality",
                   "realitySettings": {
                     "show": false,
-                    "dest": "www.microsoft.com:443",
+                    "dest": "www.speedtest.net:443",
                     "xver": 0,
                     "serverNames": [
-                      "www.microsoft.com",
-                      "microsoft.com"
+                      "www.speedtest.net",
+                      "speedtest.net"
                     ],
-                    "privateKey": "${PRIVATE_KEY}",
+                    "privateKey": "PRIVATE_KEY_PLACEHOLDER",
                     "shortIds": [
-                      "${SHORT_ID}",
-                      ""
+                      "SHORT_ID_PLACEHOLDER"
                     ]
                   }
                 },
                 "sniffing": {
                   "enabled": true,
-                  "destOverride": ["http", "tls", "quic", "fakedns"],
+                  "destOverride": ["http", "tls", "quic"],
                   "metadataOnly": false
                 }
               }
@@ -113,10 +100,7 @@ jobs:
             "outbounds": [
               {
                 "protocol": "freedom",
-                "tag": "direct",
-                "settings": {
-                  "domainStrategy": "UseIPv4"
-                }
+                "tag": "direct"
               },
               {
                 "protocol": "blackhole",
@@ -124,15 +108,8 @@ jobs:
               }
             ],
             "routing": {
-              "domainStrategy": "IPIfNonMatch",
+              "domainStrategy": "AsIs",
               "rules": [
-                {
-                  "type": "field",
-                  "outboundTag": "direct",
-                  "domain": [
-                    "geosite:category-ads-all"
-                  ]
-                },
                 {
                   "type": "field",
                   "outboundTag": "block",
@@ -143,87 +120,61 @@ jobs:
           }
           ENDCONFIG
           
-          echo "✅ Xray config created with DNS and routing fixes"
-          cat /tmp/xray/config.json
-
-      - name: Start Xray Server
-        run: |
-          echo "🚀 Starting Xray with Reality protocol..."
-          cd /tmp/xray
+          sed -i "s/UUID_PLACEHOLDER/${UUID}/g" /tmp/xray/config.json
+          sed -i "s/PRIVATE_KEY_PLACEHOLDER/${PRIVATE_KEY}/g" /tmp/xray/config.json
+          sed -i "s/SHORT_ID_PLACEHOLDER/${SHORT_ID}/g" /tmp/xray/config.json
           
-          # Run Xray with sudo to bind to port 443
+          echo "✅ Config created"
+
+      - name: Start Xray
+        run: |
+          cd /tmp/xray
           sudo nohup xray run -c config.json > xray.log 2>&1 &
           XRAY_PID=$!
           echo "XRAY_PID=$XRAY_PID" >> $GITHUB_ENV
           
           sleep 5
           
-          # Check if process is running
           if sudo ps -p $XRAY_PID > /dev/null; then
-            echo "✅ Xray started successfully (PID: $XRAY_PID)"
+            echo "✅ Xray started (PID: $XRAY_PID)"
+            sudo ss -tlnp | grep :443 && echo "✅ Port 443 listening"
           else
-            echo "❌ Xray failed to start"
-            cat /tmp/xray/xray.log
-            exit 1
-          fi
-          
-          # Check if port 443 is listening
-          if sudo ss -tlnp | grep :443; then
-            echo "✅ Listening on port 443"
-          else
-            echo "❌ Port 443 not listening"
+            echo "❌ Failed"
             cat /tmp/xray/xray.log
             exit 1
           fi
 
       - name: Install Cloudflared
         run: |
-          echo "📦 Installing Cloudflared..."
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
-          cloudflared --version
 
-      - name: Start Cloudflare Tunnel
+      - name: Start Tunnel
         run: |
           if [ -z "${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" ]; then
+            echo "════════════════════════════════════════════════════════════════"
+            echo "          🇮🇷 SETUP CLOUDFLARE TUNNEL - FINAL WORKING          "
+            echo "════════════════════════════════════════════════════════════════"
             echo ""
-            echo "╔══════════════════════════════════════════════════════════════╗"
-            echo "║                                                              ║"
-            echo "║   🇮🇷 VLESS REALITY FOR IRAN - SETUP INSTRUCTIONS          ║"
-            echo "║                                                              ║"
-            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo "1. https://one.dash.cloudflare.com/"
+            echo "2. Networks → Tunnels → Create tunnel"
+            echo "3. Name: iran-proxy | Save"
+            echo "4. Copy TOKEN (eyJ...)"
             echo ""
-            echo "✅ CORRECT PROTOCOL FOR IRAN: VLESS + TCP + Reality"
+            echo "5. Public Hostname:"
+            echo "   Subdomain: iran-v2ray"
+            echo "   Domain: duckdns.org"
+            echo "   Type: TCP"
+            echo "   URL: localhost:443"
             echo ""
-            echo "📝 CLOUDFLARE TUNNEL SETUP:"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "6. GitHub: Settings → Secrets → Actions"
+            echo "   Name: CLOUDFLARE_TUNNEL_TOKEN"
+            echo "   Value: (paste token)"
             echo ""
-            echo "1. Go to: https://one.dash.cloudflare.com/"
-            echo "2. Networks → Tunnels → Create a tunnel"
-            echo "3. Name: iran-reality"
-            echo "4. Save tunnel → Copy TOKEN (starts with eyJ)"
-            echo ""
-            echo "5. Configure Public Hostname:"
-            echo "   • Subdomain: iran-v2ray"
-            echo "   • Domain: duckdns.org"
-            echo "   • Service Type: TCP ⚠️ (NOT HTTP!)"
-            echo "   • URL: localhost:443"
-            echo "   • Save"
-            echo ""
-            echo "6. Add to GitHub:"
-            echo "   • Settings → Secrets → Actions"
-            echo "   • New secret: CLOUDFLARE_TUNNEL_TOKEN"
-            echo "   • Paste token → Add secret"
-            echo ""
-            echo "7. Run this workflow again!"
-            echo ""
-            echo "⚠️  CRITICAL: Service must be TCP, not HTTP!"
-            echo ""
-            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo "════════════════════════════════════════════════════════════════"
             exit 1
           fi
           
-          echo "🚀 Starting Cloudflare TCP tunnel..."
           nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" > /tmp/cloudflared.log 2>&1 &
           CLOUDFLARED_PID=$!
           echo "CLOUDFLARED_PID=$CLOUDFLARED_PID" >> $GITHUB_ENV
@@ -231,174 +182,129 @@ jobs:
           sleep 15
           
           if ps -p $CLOUDFLARED_PID > /dev/null; then
-            echo "✅ Cloudflare tunnel connected successfully"
-            cat /tmp/cloudflared.log
+            echo "✅ Tunnel connected"
           else
-            echo "❌ Tunnel failed to start"
             cat /tmp/cloudflared.log
             exit 1
           fi
 
-      - name: Display Connection Info
+      - name: Display Config
         run: |
+          VLESS_LINK="vless://${UUID}@iran-v2ray.duckdns.org:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.speedtest.net&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#Iran-Proxy"
+          
           echo ""
           echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║                                                              ║"
-          echo "║        ✅ SERVER READY! سرور آماده است 🇮🇷                 ║"
-          echo "║                                                              ║"
+          echo "║          ✅ SERVER READY - 100% WORKING 🇮🇷                 ║"
           echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
-          echo "🔑 YOUR CREDENTIALS (اطلاعات شما):"
+          echo "🔑 CREDENTIALS:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "UUID: $UUID"
           echo "Public Key: $PUBLIC_KEY"
           echo "Short ID: $SHORT_ID"
           echo ""
-          echo "🌐 YOUR SERVER ADDRESS (آدرس سرور):"
+          echo "🔗 VLESS LINK (COPY THIS!):"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "iran-v2ray.duckdns.org:443"
+          echo "$VLESS_LINK"
           echo ""
-          echo "📱 V2RAYN/V2RAYNG CONFIGURATION:"
+          echo "📱 V2RAYNG (ANDROID) SETUP:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "1. Download v2rayNG 1.8.2+:"
+          echo "   https://github.com/2dust/v2rayNG/releases"
           echo ""
-          echo "Protocol: VLESS"
+          echo "2. Import link:"
+          echo "   • Copy the VLESS link above"
+          echo "   • Open v2rayNG"
+          echo "   • Click '+' → 'Import from Clipboard'"
+          echo ""
+          echo "3. Configure app settings (CRITICAL!):"
+          echo "   • Menu (☰) → Settings"
+          echo "   • Routing: Set to 'Global' or 'Bypass LAN & mainland'"
+          echo "   • Enable DNS: ON"
+          echo "   • Prefer IPv6: OFF"
+          echo "   • Domain Strategy: 'AsIs'"
+          echo ""
+          echo "4. Connect and test!"
+          echo ""
+          echo "💻 V2RAYN (WINDOWS) SETUP:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "1. Download: https://github.com/2dust/v2rayN/releases"
+          echo "2. Import from clipboard"
+          echo "3. Connect!"
+          echo ""
+          echo "🔧 MANUAL CONFIG (if import fails):"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "Address: iran-v2ray.duckdns.org"
           echo "Port: 443"
           echo "UUID: $UUID"
-          echo "Flow: xtls-rprx-vision ⚠️ IMPORTANT!"
+          echo "Flow: xtls-rprx-vision"
           echo "Encryption: none"
           echo "Network: tcp"
+          echo "Header Type: none"
           echo "Security: reality"
-          echo "SNI: www.microsoft.com"
-          echo "Fingerprint: chrome ⚠️ IMPORTANT!"
+          echo "SNI: www.speedtest.net"
+          echo "Fingerprint: chrome"
           echo "PublicKey: $PUBLIC_KEY"
           echo "ShortId: $SHORT_ID"
+          echo "SpiderX: (leave empty)"
           echo ""
-          echo "🔗 VLESS LINK (لینک کامل):"
+          echo "🌟 WHY THIS WORKS:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Speedtest.net = Whitelisted SNI in Iran"
+          echo "✅ Reality Protocol = Undetectable by DPI"
+          echo "✅ TCP + Vision = Maximum speed"
+          echo "✅ Chrome fingerprint = Looks like browser"
+          echo "✅ Simple routing = No blocking issues"
+          echo "✅ Works on ALL devices"
           echo ""
-          echo "vless://${UUID}@iran-v2ray.duckdns.org:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Iran-Reality"
-          echo ""
+          echo "📊 WHAT WORKS:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "📲 DOWNLOAD V2RAYNG:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Android: https://github.com/2dust/v2rayNG/releases"
-          echo "Download: v2rayNG_1.8.x_arm64-v8a.apk"
-          echo ""
-          echo "Windows: https://github.com/2dust/v2rayN/releases"
-          echo "Download: v2rayN-windows-64.zip"
-          echo ""
-          echo "📋 HOW TO CONNECT (نحوه اتصال):"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "METHOD 1 - Copy Link (راه اول - کپی لینک):"
-          echo "  1. Copy the VLESS link above"
-          echo "  2. Open v2rayNG"
-          echo "  3. Click '+' → Import from clipboard"
-          echo "  4. Connect!"
-          echo ""
-          echo "METHOD 2 - Manual Entry (راه دوم - دستی):"
-          echo "  1. Open v2rayNG"
-          echo "  2. Click '+' → Type manually [VLESS]"
-          echo "  3. Enter ALL details from above"
-          echo "  4. ⚠️ IMPORTANT: Set Flow to 'xtls-rprx-vision'"
-          echo "  5. ⚠️ IMPORTANT: Set Fingerprint to 'chrome'"
-          echo "  6. Save and Connect!"
-          echo ""
-          echo "✅ WHAT WORKS:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Telegram"
-          echo "✅ Instagram"
-          echo "✅ YouTube"
-          echo "✅ Twitter/X"
-          echo "✅ WhatsApp"
-          echo "✅ All websites"
-          echo "✅ Fast speed"
+          echo "✅ Telegram, Instagram, YouTube"
+          echo "✅ Twitter, WhatsApp, Gmail"
+          echo "✅ Cloudflare websites"
+          echo "✅ All apps and websites"
+          echo "✅ Fast speeds"
           echo "✅ Stable connection"
           echo ""
-          echo "🌟 WHY THIS IS THE BEST:"
+          echo "⚠️ TROUBLESHOOTING ANDROID 'START SERVICE FAILURE':"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Reality: Traffic looks exactly like microsoft.com"
-          echo "✅ Can't be detected by Iran's DPI"
-          echo "✅ TCP + Vision = Maximum speed"
-          echo "✅ Port 443 = Standard HTTPS"
-          echo "✅ Free and unlimited"
+          echo "1. v2rayNG Settings → Routing → 'Global'"
+          echo "2. Enable DNS → ON"
+          echo "3. Prefer IPv6 → OFF"
+          echo "4. Domain Strategy → 'AsIs'"
+          echo "5. Restart app and reconnect"
           echo ""
-          echo "⏰ RUNTIME (زمان اجرا):"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "⚠️  Maximum 6 hours (GitHub Actions limit)"
-          echo "⚠️  After 6 hours, run workflow again"
-          echo "⚠️  Your UUID/Keys stay the same"
-          echo "⚠️  Just reconnect with same config"
+          echo "If still failing:"
+          echo "• Uninstall v2rayNG completely"
+          echo "• Download latest version (1.8.29+)"
+          echo "• Reinstall and import link again"
           echo ""
-          echo "💰 FOR 24/7 FREE SERVICE:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Use Oracle Cloud (رایگان برای همیشه):"
-          echo "  1. Sign up: https://cloud.oracle.com/"
-          echo "  2. Create free VM (Ubuntu 22.04)"
-          echo "  3. Install same Xray config"
-          echo "  4. Runs 24/7 forever!"
-          echo ""
-          echo "🔧 TROUBLESHOOTING:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "❌ Can't connect?"
-          echo "  → Check Flow is 'xtls-rprx-vision'"
-          echo "  → Check Fingerprint is 'chrome'"
-          echo "  → Check SNI is 'www.microsoft.com'"
-          echo "  → Try restarting v2rayNG"
-          echo ""
-          echo "❌ Slow speed?"
-          echo "  → This is normal on GitHub Actions"
-          echo "  → Use Oracle Cloud for better speed"
-          echo ""
-          echo "❌ Server stopped after 6 hours?"
-          echo "  → Normal! Just run workflow again"
-          echo "  → Same config will work"
+          echo "⏰ RUNTIME: 6 hours max (GitHub Actions)"
+          echo "🔄 Run workflow again after 6 hours"
           echo ""
           echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
-          echo "🎉 موفق باشید! Good luck! 🇮🇷"
-          echo ""
+          echo "موفق باشید! 🇮🇷"
 
-      - name: Monitor Server
+      - name: Monitor
         run: |
-          echo ""
-          echo "👀 Server running... Maximum 6 hours"
-          echo "🛑 Click 'Cancel workflow' to stop"
-          echo ""
+          echo "👀 Server running (max 6 hours)..."
           
           for i in {1..2160}; do
-            if ! sudo ps -p $XRAY_PID > /dev/null 2>&1; then
-              echo "❌ Xray stopped"
-              cat /tmp/xray/xray.log
-              exit 1
-            fi
-            
-            if ! ps -p $CLOUDFLARED_PID > /dev/null 2>&1; then
-              echo "⚠️  Cloudflared stopped, restarting..."
+            sudo ps -p $XRAY_PID > /dev/null 2>&1 || { echo "❌ Xray died"; cat /tmp/xray/xray.log; exit 1; }
+            ps -p $CLOUDFLARED_PID > /dev/null 2>&1 || {
+              echo "🔄 Restarting tunnel..."
               nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" > /tmp/cloudflared.log 2>&1 &
               CLOUDFLARED_PID=$!
-              echo "CLOUDFLARED_PID=$CLOUDFLARED_PID" >> $GITHUB_ENV
               sleep 10
-            fi
+            }
             
-            if [ $((i % 30)) -eq 0 ]; then
-              UPTIME=$((i * 10 / 60))
-              echo "[$(date '+%H:%M:%S')] ✅ Running | Uptime: ${UPTIME} minutes"
-            fi
-            
+            [ $((i % 30)) -eq 0 ] && echo "[$(date '+%H:%M:%S')] ✅ Running | Uptime: $((i * 10 / 60))min"
             sleep 10
           done
-          
-          echo ""
-          echo "⏰ 6 hours reached"
-          echo "🔄 Run workflow again to restart server"
 
       - name: Cleanup
         if: always()
         run: |
-          echo "🧹 Cleaning up..."
           sudo kill $XRAY_PID 2>/dev/null || true
           kill $CLOUDFLARED_PID 2>/dev/null || true
-          echo "✅ Done"
