@@ -1,4 +1,4 @@
-name: Iran Dual Protocol - PC (Reality) + Android (VMess WS)
+name: Iran Dual Protocol - VLESS WebSocket (PC + Android)
 
 on:
   workflow_dispatch:
@@ -22,23 +22,14 @@ jobs:
 
       - name: Generate Keys
         run: |
-          UUID=$(cat /proc/sys/kernel/random/uuid)
+          UUID_PC=$(cat /proc/sys/kernel/random/uuid)
           UUID_ANDROID=$(cat /proc/sys/kernel/random/uuid)
-          xray x25519 > /tmp/keys.txt 2>&1
           
-          PRIVATE_KEY=$(grep -i "private" /tmp/keys.txt | grep -oE '[A-Za-z0-9_-]{43}' | head -1)
-          PUBLIC_KEY=$(grep -i "public" /tmp/keys.txt | grep -oE '[A-Za-z0-9_-]{43}' | head -1)
-          SHORT_ID=$(openssl rand -hex 8)
-          
-          echo "PRIVATE_KEY=$PRIVATE_KEY" >> $GITHUB_ENV
-          echo "PUBLIC_KEY=$PUBLIC_KEY" >> $GITHUB_ENV
-          echo "UUID=$UUID" >> $GITHUB_ENV
+          echo "UUID_PC=$UUID_PC" >> $GITHUB_ENV
           echo "UUID_ANDROID=$UUID_ANDROID" >> $GITHUB_ENV
-          echo "SHORT_ID=$SHORT_ID" >> $GITHUB_ENV
           
-          echo "✅ PC UUID: $UUID"
-          echo "✅ Android UUID: $UUID_ANDROID"
-          echo "✅ Public Key: $PUBLIC_KEY"
+          echo "PC UUID: $UUID_PC"
+          echo "Android UUID: $UUID_ANDROID"
 
       - name: Download GeoIP
         run: |
@@ -47,38 +38,35 @@ jobs:
           wget -q -O /tmp/xray/geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat
           sudo cp /tmp/xray/*.dat /usr/local/bin/
 
-      - name: Create Dual Protocol Config
+      - name: Create Dual VLESS WebSocket Config
         run: |
           cat > /tmp/xray/config.json << ENDCONFIG
           {
             "log": {"loglevel": "warning"},
             "inbounds": [
               {
-                "listen": "0.0.0.0",
-                "port": 443,
+                "listen": "127.0.0.1",
+                "port": 8081,
                 "protocol": "vless",
+                "tag": "pc-inbound",
                 "settings": {
-                  "clients": [{"id": "${UUID}", "flow": "xtls-rprx-vision"}],
+                  "clients": [{"id": "${UUID_PC}"}],
                   "decryption": "none"
                 },
                 "streamSettings": {
-                  "network": "tcp",
-                  "security": "reality",
-                  "realitySettings": {
-                    "show": false,
-                    "dest": "www.microsoft.com:443",
-                    "xver": 0,
-                    "serverNames": ["www.microsoft.com", "microsoft.com"],
-                    "privateKey": "${PRIVATE_KEY}",
-                    "shortIds": ["${SHORT_ID}", ""]
+                  "network": "ws",
+                  "security": "none",
+                  "wsSettings": {
+                    "path": "/pc"
                   }
                 },
                 "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
               },
               {
                 "listen": "127.0.0.1",
-                "port": 8080,
+                "port": 8082,
                 "protocol": "vless",
+                "tag": "android-inbound",
                 "settings": {
                   "clients": [{"id": "${UUID_ANDROID}"}],
                   "decryption": "none"
@@ -87,29 +75,30 @@ jobs:
                   "network": "ws",
                   "security": "none",
                   "wsSettings": {
-                    "path": "/"
+                    "path": "/android"
                   }
                 },
                 "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
               }
             ],
-            "outbounds": [{"protocol": "freedom"}]
+            "outbounds": [
+              {"protocol": "freedom", "tag": "direct"}
+            ]
           }
           ENDCONFIG
           
-          echo "✅ Dual protocol config created"
+          echo "Dual VLESS WebSocket config created"
 
       - name: Start Xray
         run: |
           cd /tmp/xray
           sudo nohup xray run -c config.json > xray.log 2>&1 &
-          XRAY_PID=$!
-          echo "XRAY_PID=$XRAY_PID" >> $GITHUB_ENV
           sleep 5
           
-          if sudo ps -p $XRAY_PID > /dev/null && sudo ss -tlnp | grep :443; then
-            echo "✅ Xray started (PID: $XRAY_PID)"
+          if sudo ss -tlnp | grep -E ":(8081|8082)"; then
+            echo "Xray started on ports 8081 (PC) and 8082 (Android)"
           else
+            echo "Xray failed to start:"
             cat /tmp/xray/xray.log
             exit 1
           fi
@@ -119,181 +108,164 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-      - name: Start Cloudflare Tunnels (BOTH)
+      - name: Start Cloudflare Quick Tunnels
         run: |
-          if [ -z "${{ secrets.CF_TUNNEL_REALITY }}" ] || [ -z "${{ secrets.CF_TUNNEL_VMESS }}" ]; then
-            echo "══════════════════════════════════════════════════════════════"
-            echo "       DUAL TUNNEL SETUP - PC (Reality) + Android (VLESS WS)"
-            echo "══════════════════════════════════════════════════════════════"
-            echo ""
-            echo "YOU NEED 2 CLOUDFLARE TUNNELS:"
-            echo ""
-            echo "TUNNEL 1 - FOR PC (Reality/TCP):"
-            echo "1. https://one.dash.cloudflare.com/"
-            echo "2. Create tunnel: iran-reality"
-            echo "3. Copy TOKEN"
-            echo "4. Public Hostname:"
-            echo "   Subdomain: iran-pc"
-            echo "   Domain: duckdns.org"
-            echo "   Type: TCP"
-            echo "   URL: localhost:443"
-            echo "5. GitHub Secret:"
-            echo "   Name: CF_TUNNEL_REALITY"
-            echo "   Value: (paste token)"
-            echo ""
-            echo "TUNNEL 2 - FOR ANDROID (VLESS/WebSocket):"
-            echo "1. Create tunnel: iran-android"
-            echo "2. Copy TOKEN"
-            echo "3. Public Hostname:"
-            echo "   Subdomain: iran-android"
-            echo "   Domain: duckdns.org"
-            echo "   Type: HTTP"
-            echo "   URL: http://localhost:8080"
-            echo "4. GitHub Secret:"
-            echo "   Name: CF_TUNNEL_VMESS"
-            echo "   Value: (paste token)"
-            echo ""
-            echo "══════════════════════════════════════════════════════════════"
+          # Start PC tunnel (quick tunnel - no config needed)
+          nohup cloudflared tunnel --url http://localhost:8081 --no-autoupdate > /tmp/cf-pc.log 2>&1 &
+          CF_PC_PID=$!
+          echo "CF_PC_PID=$CF_PC_PID" >> $GITHUB_ENV
+          
+          # Start Android tunnel (quick tunnel - no config needed)
+          nohup cloudflared tunnel --url http://localhost:8082 --no-autoupdate > /tmp/cf-android.log 2>&1 &
+          CF_ANDROID_PID=$!
+          echo "CF_ANDROID_PID=$CF_ANDROID_PID" >> $GITHUB_ENV
+          
+          echo "Waiting for tunnels to initialize..."
+          sleep 20
+          
+          # Extract tunnel URLs
+          PC_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-pc.log | head -1)
+          ANDROID_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-android.log | head -1)
+          
+          if [ -z "$PC_URL" ] || [ -z "$ANDROID_URL" ]; then
+            echo "Waiting more for tunnel URLs..."
+            sleep 20
+            PC_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-pc.log | head -1)
+            ANDROID_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-android.log | head -1)
+          fi
+          
+          if [ -z "$PC_URL" ] || [ -z "$ANDROID_URL" ]; then
+            echo "Failed to get tunnel URLs"
+            echo "PC tunnel log:"
+            cat /tmp/cf-pc.log
+            echo "Android tunnel log:"
+            cat /tmp/cf-android.log
             exit 1
           fi
           
-          # Start Reality tunnel (PC)
-          nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_REALITY }}" > /tmp/cf-reality.log 2>&1 &
-          CF_REALITY_PID=$!
-          echo "CF_REALITY_PID=$CF_REALITY_PID" >> $GITHUB_ENV
+          # Extract hostnames
+          PC_HOST=$(echo "$PC_URL" | sed 's|https://||')
+          ANDROID_HOST=$(echo "$ANDROID_URL" | sed 's|https://||')
           
-          # Start VLESS WS tunnel (Android)
-          nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_VMESS }}" > /tmp/cf-vmess.log 2>&1 &
-          CF_VMESS_PID=$!
-          echo "CF_VMESS_PID=$CF_VMESS_PID" >> $GITHUB_ENV
+          echo "PC_HOST=$PC_HOST" >> $GITHUB_ENV
+          echo "ANDROID_HOST=$ANDROID_HOST" >> $GITHUB_ENV
           
-          sleep 15
-          
-          if ps -p $CF_REALITY_PID > /dev/null && ps -p $CF_VMESS_PID > /dev/null; then
-            echo "✅ Both tunnels running!"
-            echo "Reality PID: $CF_REALITY_PID"
-            echo "VLESS WS PID: $CF_VMESS_PID"
-          else
-            echo "❌ Tunnel failed"
-            cat /tmp/cf-reality.log
-            cat /tmp/cf-vmess.log
-            exit 1
-          fi
+          echo "Tunnels created successfully!"
+          echo "PC Tunnel: $PC_URL"
+          echo "Android Tunnel: $ANDROID_URL"
 
       - name: Display Connection Info
         run: |
-          VLESS_ANDROID_LINK="vless://${UUID_ANDROID}@iran-android.duckdns.org:443?encryption=none&security=tls&sni=iran-android.duckdns.org&fp=firefox&type=ws&host=iran-android.duckdns.org&path=%2F#Iran-Android"
-          
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║                                                              ║"
-          echo "║      ✅ DUAL PROTOCOL - PC + ANDROID WORKING! 🇮🇷           ║"
-          echo "║                                                              ║"
-          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo "================================================================"
+          echo "     DUAL VLESS WEBSOCKET - PC + ANDROID READY"
+          echo "================================================================"
           echo ""
-          echo "💻 FOR PC/LAPTOP (FAST - Reality Protocol):"
-          echo "────────────────────────────────────────────────────────────────"
-          echo "Address: iran-pc.duckdns.org"
-          echo "Port: 443"
-          echo "UUID: $UUID"
-          echo "Flow: xtls-rprx-vision"
-          echo "Security: reality"
-          echo "SNI: www.microsoft.com"
-          echo "Fingerprint: chrome"
-          echo "PublicKey: $PUBLIC_KEY"
-          echo "ShortId: $SHORT_ID"
+          echo "--- PC CONNECTION (v2rayN / Nekoray / Hiddify) ---"
           echo ""
-          echo "VLESS Link (PC):"
-          echo "vless://${UUID}@iran-pc.duckdns.org:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Iran-PC"
+          echo "VLESS Link (copy this):"
+          echo "vless://${UUID_PC}@${PC_HOST}:443?encryption=none&security=tls&sni=${PC_HOST}&fp=chrome&type=ws&host=${PC_HOST}&path=%2Fpc#Iran-PC"
           echo ""
-          echo "📱 FOR ANDROID (RELIABLE - VLESS WebSocket with TLS):"
-          echo "────────────────────────────────────────────────────────────────"
-          echo "VLESS Link (Android):"
-          echo "$VLESS_ANDROID_LINK"
+          echo "Manual Config:"
+          echo "  Protocol: VLESS"
+          echo "  Address: ${PC_HOST}"
+          echo "  Port: 443"
+          echo "  UUID: ${UUID_PC}"
+          echo "  Encryption: none"
+          echo "  Network: ws"
+          echo "  Path: /pc"
+          echo "  TLS: Enable"
+          echo "  SNI: ${PC_HOST}"
+          echo "  Fingerprint: chrome"
           echo ""
-          echo "OR Manual Config:"
-          echo "Protocol: VLESS"
-          echo "Address: iran-android.duckdns.org"
-          echo "Port: 443"
-          echo "UUID: $UUID_ANDROID"
-          echo "Encryption: none"
-          echo "Network: ws"
-          echo "Path: /"
-          echo "TLS: Enable"
-          echo "SNI: iran-android.duckdns.org"
-          echo "Fingerprint: firefox"
+          echo "--- ANDROID CONNECTION (v2rayNG) ---"
           echo ""
-          echo "📲 ANDROID SETUP:"
-          echo "────────────────────────────────────────────────────────────────"
-          echo "1. Download v2rayNG from Play Store or:"
-          echo "   https://github.com/2dust/v2rayNG/releases"
-          echo "2. Open app"
-          echo "3. Click '+' → 'Import from Clipboard'"
-          echo "4. Paste the VLESS link above"
-          echo "5. Connect - WORKS INSTANTLY!"
+          echo "VLESS Link (copy this):"
+          echo "vless://${UUID_ANDROID}@${ANDROID_HOST}:443?encryption=none&security=tls&sni=${ANDROID_HOST}&fp=firefox&type=ws&host=${ANDROID_HOST}&path=%2Fandroid#Iran-Android"
           echo ""
-          echo "💻 PC SETUP:"
-          echo "────────────────────────────────────────────────────────────────"
-          echo "1. Download v2rayN:"
-          echo "   https://github.com/2dust/v2rayN/releases"
-          echo "2. Import VLESS link from clipboard"
-          echo "3. Connect!"
+          echo "Manual Config:"
+          echo "  Protocol: VLESS"
+          echo "  Address: ${ANDROID_HOST}"
+          echo "  Port: 443"
+          echo "  UUID: ${UUID_ANDROID}"
+          echo "  Encryption: none"
+          echo "  Network: ws"
+          echo "  Path: /android"
+          echo "  TLS: Enable"
+          echo "  SNI: ${ANDROID_HOST}"
+          echo "  Fingerprint: firefox"
           echo ""
-          echo "🔥 KEY FEATURES:"
-          echo "────────────────────────────────────────────────────────────────"
-          echo "✅ PC: Reality (FAST, undetectable)"
-          echo "✅ Android: VLESS+WS+TLS (RELIABLE, always works)"
-          echo "✅ 2 separate tunnels = MORE STABLE"
-          echo "✅ Tunnels run independently = NO BROWSER NEEDED!"
-          echo "✅ Different UUIDs for security"
-          echo "✅ Both run for 6 hours"
+          echo "--- SETUP INSTRUCTIONS ---"
           echo ""
-          echo "🌟 WHY THIS WORKS:"
-          echo "────────────────────────────────────────────────────────────────"
-          echo "PC: Reality over TCP tunnel = Maximum speed"
-          echo "Android: VLESS over HTTPS tunnel = Maximum compatibility"
-          echo "Both: Run as background services = No browser needed!"
-          echo "VLESS is lighter and faster than VMess!"
+          echo "PC (v2rayN):"
+          echo "  1. Download: https://github.com/2dust/v2rayN/releases"
+          echo "  2. Copy the VLESS link above"
+          echo "  3. In v2rayN: Servers -> Import from clipboard"
+          echo "  4. Click Connect"
           echo ""
-          echo "⏰ RUNTIME: 6 hours max"
-          echo "🔄 Run workflow again after 6 hours"
-          echo "💡 UUIDs stay the same"
+          echo "Android (v2rayNG):"
+          echo "  1. Download from Play Store or:"
+          echo "     https://github.com/2dust/v2rayNG/releases"
+          echo "  2. Copy the VLESS link above"
+          echo "  3. Tap + -> Import from clipboard"
+          echo "  4. Tap the play button"
           echo ""
-          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo "--- INFO ---"
+          echo "  Runtime: 6 hours max"
+          echo "  Protocol: VLESS + WebSocket + TLS"
+          echo "  Tunnels: Cloudflare Quick Tunnels (no setup needed)"
           echo ""
-          echo "موفق باشید! 🇮🇷"
+          echo "================================================================"
 
       - name: Monitor
         run: |
-          echo "👀 Monitoring both tunnels (6 hours max)..."
+          echo "Monitoring tunnels for 6 hours..."
           
           for i in {1..2160}; do
-            # Check Xray
-            sudo ps -p $XRAY_PID > /dev/null 2>&1 || { echo "❌ Xray died"; cat /tmp/xray/xray.log; exit 1; }
+            # Check if Xray is running
+            if ! sudo ss -tlnp | grep -q ":8081"; then
+              echo "Xray died, restarting..."
+              cd /tmp/xray
+              sudo nohup xray run -c config.json > xray.log 2>&1 &
+              sleep 5
+            fi
             
-            # Check Reality tunnel
-            ps -p $CF_REALITY_PID > /dev/null 2>&1 || {
-              echo "🔄 Restarting Reality tunnel..."
-              nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_REALITY }}" > /tmp/cf-reality.log 2>&1 &
-              CF_REALITY_PID=$!
-              sleep 10
-            }
+            # Check PC tunnel
+            if ! ps -p $CF_PC_PID > /dev/null 2>&1; then
+              echo "Restarting PC tunnel..."
+              nohup cloudflared tunnel --url http://localhost:8081 --no-autoupdate > /tmp/cf-pc.log 2>&1 &
+              CF_PC_PID=$!
+              sleep 15
+              NEW_PC_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-pc.log | head -1)
+              if [ -n "$NEW_PC_URL" ]; then
+                NEW_PC_HOST=$(echo "$NEW_PC_URL" | sed 's|https://||')
+                echo "New PC URL: $NEW_PC_URL"
+                echo "New PC VLESS: vless://${UUID_PC}@${NEW_PC_HOST}:443?encryption=none&security=tls&sni=${NEW_PC_HOST}&fp=chrome&type=ws&host=${NEW_PC_HOST}&path=%2Fpc#Iran-PC"
+              fi
+            fi
             
-            # Check VLESS WS tunnel
-            ps -p $CF_VMESS_PID > /dev/null 2>&1 || {
-              echo "🔄 Restarting VLESS WS tunnel..."
-              nohup cloudflared tunnel --no-autoupdate run --token "${{ secrets.CF_TUNNEL_VMESS }}" > /tmp/cf-vmess.log 2>&1 &
-              CF_VMESS_PID=$!
-              sleep 10
-            }
+            # Check Android tunnel
+            if ! ps -p $CF_ANDROID_PID > /dev/null 2>&1; then
+              echo "Restarting Android tunnel..."
+              nohup cloudflared tunnel --url http://localhost:8082 --no-autoupdate > /tmp/cf-android.log 2>&1 &
+              CF_ANDROID_PID=$!
+              sleep 15
+              NEW_ANDROID_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-android.log | head -1)
+              if [ -n "$NEW_ANDROID_URL" ]; then
+                NEW_ANDROID_HOST=$(echo "$NEW_ANDROID_URL" | sed 's|https://||')
+                echo "New Android URL: $NEW_ANDROID_URL"
+                echo "New Android VLESS: vless://${UUID_ANDROID}@${NEW_ANDROID_HOST}:443?encryption=none&security=tls&sni=${NEW_ANDROID_HOST}&fp=firefox&type=ws&host=${NEW_ANDROID_HOST}&path=%2Fandroid#Iran-Android"
+              fi
+            fi
             
-            [ $((i % 30)) -eq 0 ] && echo "[$(date '+%H:%M:%S')] ✅ All running | $((i * 10 / 60))min"
+            [ $((i % 60)) -eq 0 ] && echo "[$(date '+%H:%M:%S')] Running | $((i * 10 / 60))min elapsed"
             sleep 10
           done
 
       - name: Cleanup
         if: always()
         run: |
-          sudo kill $XRAY_PID 2>/dev/null || true
-          kill $CF_REALITY_PID 2>/dev/null || true
-          kill $CF_VMESS_PID 2>/dev/null || true
+          sudo pkill -f xray || true
+          kill $CF_PC_PID 2>/dev/null || true
+          kill $CF_ANDROID_PID 2>/dev/null || true
+          echo "Cleanup complete"
