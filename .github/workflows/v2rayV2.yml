@@ -1,4 +1,12 @@
-name: Iran Dual Protocol - VLESS WebSocket (PC + Android)
+name: VLESS XHTTP Cloudflare Tunnel
+
+# This workflow runs a VLESS proxy server using XHTTP transport through
+# Cloudflare Tunnel. It uses Cloudflare's TLS (not Reality) which is the
+# only way to work reliably through Cloudflare tunnels.
+#
+# TWO MODES:
+# 1. Quick Tunnel (default): No secrets needed, generates temporary URL
+# 2. Token Tunnel: Add CF_TUNNEL_TOKEN secret for permanent URL
 
 on:
   workflow_dispatch:
@@ -12,260 +20,242 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install Xray
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip wget jq
+
+      - name: Install Xray core
         run: |
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -q Xray-linux-64.zip
-          sudo mv xray /usr/local/bin/
+          sudo mv xray /usr/local/bin/xray
           sudo chmod +x /usr/local/bin/xray
-          xray version
+          xray --version
 
-      - name: Generate Keys
+      - name: Generate credentials
         run: |
-          UUID_PC=$(cat /proc/sys/kernel/random/uuid)
-          UUID_ANDROID=$(cat /proc/sys/kernel/random/uuid)
+          echo "Generating UUID..."
+          UUID=$(xray uuid)
+          echo "UUID=$UUID" >> $GITHUB_ENV
           
-          echo "UUID_PC=$UUID_PC" >> $GITHUB_ENV
-          echo "UUID_ANDROID=$UUID_ANDROID" >> $GITHUB_ENV
+          # Generate random path for security
+          RANDOM_PATH="/$(openssl rand -hex 8)"
+          echo "XHTTP_PATH=$RANDOM_PATH" >> $GITHUB_ENV
           
-          echo "PC UUID: $UUID_PC"
-          echo "Android UUID: $UUID_ANDROID"
+          echo "UUID: $UUID"
+          echo "Path: $RANDOM_PATH"
 
-      - name: Download GeoIP
+      - name: Install cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          cloudflared --version
+
+      - name: Build Xray configuration
         run: |
           mkdir -p /tmp/xray
-          wget -q -O /tmp/xray/geoip.dat https://github.com/v2fly/geoip/releases/latest/download/geoip.dat
-          wget -q -O /tmp/xray/geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat
-          sudo cp /tmp/xray/*.dat /usr/local/bin/
-
-      - name: Create Dual VLESS WebSocket Config
-        run: |
-          cat > /tmp/xray/config.json << ENDCONFIG
+          
+          cat > /tmp/xray/config.json <<EOF
           {
-            "log": {"loglevel": "warning"},
+            "log": {
+              "loglevel": "warning"
+            },
             "inbounds": [
               {
                 "listen": "127.0.0.1",
-                "port": 8081,
+                "port": 8080,
                 "protocol": "vless",
-                "tag": "pc-inbound",
                 "settings": {
-                  "clients": [{"id": "${UUID_PC}"}],
-                  "decryption": "none"
+                  "decryption": "none",
+                  "clients": [
+                    {
+                      "id": "$UUID"
+                    }
+                  ]
                 },
                 "streamSettings": {
-                  "network": "ws",
-                  "security": "none",
-                  "wsSettings": {
-                    "path": "/pc"
+                  "network": "xhttp",
+                  "xhttpSettings": {
+                    "path": "$XHTTP_PATH"
                   }
                 },
-                "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
-              },
-              {
-                "listen": "127.0.0.1",
-                "port": 8082,
-                "protocol": "vless",
-                "tag": "android-inbound",
-                "settings": {
-                  "clients": [{"id": "${UUID_ANDROID}"}],
-                  "decryption": "none"
-                },
-                "streamSettings": {
-                  "network": "ws",
-                  "security": "none",
-                  "wsSettings": {
-                    "path": "/android"
-                  }
-                },
-                "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
+                "sniffing": {
+                  "enabled": true,
+                  "destOverride": ["http", "tls", "quic"]
+                }
               }
             ],
             "outbounds": [
-              {"protocol": "freedom", "tag": "direct"}
+              {
+                "protocol": "freedom",
+                "tag": "direct"
+              },
+              {
+                "protocol": "blackhole",
+                "tag": "block"
+              }
             ]
           }
-          ENDCONFIG
+          EOF
           
-          echo "Dual VLESS WebSocket config created"
+          echo "Xray configuration created"
+          cat /tmp/xray/config.json
 
       - name: Start Xray
         run: |
-          cd /tmp/xray
-          sudo nohup xray run -c config.json > xray.log 2>&1 &
-          sleep 5
+          nohup xray run -c /tmp/xray/config.json > /tmp/xray/xray.log 2>&1 &
+          sleep 3
           
-          if sudo ss -tlnp | grep -E ":(8081|8082)"; then
-            echo "Xray started on ports 8081 (PC) and 8082 (Android)"
+          if pgrep -x "xray" > /dev/null; then
+            echo "Xray started successfully"
           else
-            echo "Xray failed to start:"
+            echo "Failed to start Xray"
             cat /tmp/xray/xray.log
             exit 1
           fi
 
-      - name: Install Cloudflared
+      - name: Start Cloudflare Tunnel
+        env:
+          CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+          mkdir -p /tmp/tunnel
+          
+          if [ -n "$CF_TUNNEL_TOKEN" ]; then
+            echo "Starting token-based tunnel..."
+            echo "IMPORTANT: Make sure your Cloudflare tunnel is configured to route to http://localhost:8080"
+            nohup cloudflared tunnel --no-autoupdate run --token "$CF_TUNNEL_TOKEN" > /tmp/tunnel/cloudflared.log 2>&1 &
+            sleep 10
+            
+            if pgrep -x "cloudflared" > /dev/null; then
+              echo "TUNNEL_MODE=token" >> $GITHUB_ENV
+              echo "Token tunnel started"
+              echo ""
+              echo "=============================================="
+              echo "TOKEN TUNNEL ACTIVE"
+              echo "=============================================="
+              echo "Your tunnel is running. Use the hostname you"
+              echo "configured in the Cloudflare dashboard."
+              echo ""
+              echo "Make sure your tunnel public hostname points to:"
+              echo "  Service: http://localhost:8080"
+              echo "=============================================="
+            else
+              echo "Failed to start tunnel"
+              cat /tmp/tunnel/cloudflared.log
+              exit 1
+            fi
+          else
+            echo "Starting quick tunnel (no token provided)..."
+            nohup cloudflared tunnel --no-autoupdate --url http://localhost:8080 --logfile /tmp/tunnel/cloudflared.log > /tmp/tunnel/tunnel_url.log 2>&1 &
+            
+            # Wait for tunnel URL
+            echo "Waiting for tunnel URL..."
+            for i in {1..30}; do
+              TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/tunnel/cloudflared.log 2>/dev/null | head -1)
+              if [ -n "$TUNNEL_URL" ]; then
+                echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+                echo "TUNNEL_MODE=quick" >> $GITHUB_ENV
+                break
+              fi
+              sleep 2
+            done
+            
+            if [ -z "$TUNNEL_URL" ]; then
+              echo "Failed to get tunnel URL"
+              cat /tmp/tunnel/cloudflared.log
+              cat /tmp/tunnel/tunnel_url.log
+              exit 1
+            fi
+            
+            echo "Quick tunnel started: $TUNNEL_URL"
+          fi
 
-      - name: Start Cloudflare Quick Tunnels
+      - name: Print connection details
         run: |
-          # Start PC tunnel (quick tunnel - no config needed)
-          nohup cloudflared tunnel --url http://localhost:8081 --no-autoupdate > /tmp/cf-pc.log 2>&1 &
-          CF_PC_PID=$!
-          echo "CF_PC_PID=$CF_PC_PID" >> $GITHUB_ENV
+          echo ""
+          echo "=============================================="
+          echo "       VLESS XHTTP CONNECTION DETAILS        "
+          echo "=============================================="
+          echo ""
           
-          # Start Android tunnel (quick tunnel - no config needed)
-          nohup cloudflared tunnel --url http://localhost:8082 --no-autoupdate > /tmp/cf-android.log 2>&1 &
-          CF_ANDROID_PID=$!
-          echo "CF_ANDROID_PID=$CF_ANDROID_PID" >> $GITHUB_ENV
-          
-          echo "Waiting for tunnels to initialize..."
-          sleep 20
-          
-          # Extract tunnel URLs
-          PC_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-pc.log | head -1)
-          ANDROID_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-android.log | head -1)
-          
-          if [ -z "$PC_URL" ] || [ -z "$ANDROID_URL" ]; then
-            echo "Waiting more for tunnel URLs..."
-            sleep 20
-            PC_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-pc.log | head -1)
-            ANDROID_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-android.log | head -1)
+          if [ "$TUNNEL_MODE" = "quick" ]; then
+            # Extract hostname from URL
+            HOSTNAME=$(echo "$TUNNEL_URL" | sed 's|https://||')
+            
+            echo "Server   : $HOSTNAME"
+            echo "Port     : 443"
+            echo "UUID     : $UUID"
+            echo "Encryption: none"
+            echo "Transport: xhttp (or splithttp/httpupgrade in some clients)"
+            echo "Security : tls"
+            echo "SNI      : $HOSTNAME"
+            echo "Path     : $XHTTP_PATH"
+            echo ""
+            echo "----------------------------------------------"
+            echo "VLESS URL (copy this):"
+            echo "----------------------------------------------"
+            ENCODED_PATH=$(echo "$XHTTP_PATH" | sed 's|/|%2F|g')
+            echo "vless://$UUID@$HOSTNAME:443?encryption=none&security=tls&sni=$HOSTNAME&type=xhttp&path=$ENCODED_PATH#VLESS-XHTTP-CF"
+            echo ""
+            echo "----------------------------------------------"
+            echo "Alternative URL (for clients using httpupgrade):"
+            echo "----------------------------------------------"
+            echo "vless://$UUID@$HOSTNAME:443?encryption=none&security=tls&sni=$HOSTNAME&type=httpupgrade&path=$ENCODED_PATH#VLESS-HTTPUpgrade-CF"
+            echo ""
+          else
+            echo "Token tunnel mode - use your configured hostname"
+            echo ""
+            echo "UUID     : $UUID"
+            echo "Port     : 443"
+            echo "Encryption: none"
+            echo "Transport: xhttp"
+            echo "Security : tls"
+            echo "Path     : $XHTTP_PATH"
+            echo ""
+            echo "Replace YOUR_HOSTNAME with your Cloudflare tunnel hostname:"
+            ENCODED_PATH=$(echo "$XHTTP_PATH" | sed 's|/|%2F|g')
+            echo "vless://$UUID@YOUR_HOSTNAME:443?encryption=none&security=tls&sni=YOUR_HOSTNAME&type=xhttp&path=$ENCODED_PATH#VLESS-XHTTP-CF"
           fi
           
-          if [ -z "$PC_URL" ] || [ -z "$ANDROID_URL" ]; then
-            echo "Failed to get tunnel URLs"
-            echo "PC tunnel log:"
-            cat /tmp/cf-pc.log
-            echo "Android tunnel log:"
-            cat /tmp/cf-android.log
-            exit 1
-          fi
-          
-          # Extract hostnames
-          PC_HOST=$(echo "$PC_URL" | sed 's|https://||')
-          ANDROID_HOST=$(echo "$ANDROID_URL" | sed 's|https://||')
-          
-          echo "PC_HOST=$PC_HOST" >> $GITHUB_ENV
-          echo "ANDROID_HOST=$ANDROID_HOST" >> $GITHUB_ENV
-          
-          echo "Tunnels created successfully!"
-          echo "PC Tunnel: $PC_URL"
-          echo "Android Tunnel: $ANDROID_URL"
+          echo "=============================================="
+          echo ""
 
-      - name: Display Connection Info
+      - name: Keep alive and monitor
         run: |
+          echo "Workflow running. Cancel this action to stop."
           echo ""
-          echo "================================================================"
-          echo "     DUAL VLESS WEBSOCKET - PC + ANDROID READY"
-          echo "================================================================"
-          echo ""
-          echo "--- PC CONNECTION (v2rayN / Nekoray / Hiddify) ---"
-          echo ""
-          echo "VLESS Link (copy this):"
-          echo "vless://${UUID_PC}@${PC_HOST}:443?encryption=none&security=tls&sni=${PC_HOST}&fp=chrome&type=ws&host=${PC_HOST}&path=%2Fpc#Iran-PC"
-          echo ""
-          echo "Manual Config:"
-          echo "  Protocol: VLESS"
-          echo "  Address: ${PC_HOST}"
-          echo "  Port: 443"
-          echo "  UUID: ${UUID_PC}"
-          echo "  Encryption: none"
-          echo "  Network: ws"
-          echo "  Path: /pc"
-          echo "  TLS: Enable"
-          echo "  SNI: ${PC_HOST}"
-          echo "  Fingerprint: chrome"
-          echo ""
-          echo "--- ANDROID CONNECTION (v2rayNG) ---"
-          echo ""
-          echo "VLESS Link (copy this):"
-          echo "vless://${UUID_ANDROID}@${ANDROID_HOST}:443?encryption=none&security=tls&sni=${ANDROID_HOST}&fp=firefox&type=ws&host=${ANDROID_HOST}&path=%2Fandroid#Iran-Android"
-          echo ""
-          echo "Manual Config:"
-          echo "  Protocol: VLESS"
-          echo "  Address: ${ANDROID_HOST}"
-          echo "  Port: 443"
-          echo "  UUID: ${UUID_ANDROID}"
-          echo "  Encryption: none"
-          echo "  Network: ws"
-          echo "  Path: /android"
-          echo "  TLS: Enable"
-          echo "  SNI: ${ANDROID_HOST}"
-          echo "  Fingerprint: firefox"
-          echo ""
-          echo "--- SETUP INSTRUCTIONS ---"
-          echo ""
-          echo "PC (v2rayN):"
-          echo "  1. Download: https://github.com/2dust/v2rayN/releases"
-          echo "  2. Copy the VLESS link above"
-          echo "  3. In v2rayN: Servers -> Import from clipboard"
-          echo "  4. Click Connect"
-          echo ""
-          echo "Android (v2rayNG):"
-          echo "  1. Download from Play Store or:"
-          echo "     https://github.com/2dust/v2rayNG/releases"
-          echo "  2. Copy the VLESS link above"
-          echo "  3. Tap + -> Import from clipboard"
-          echo "  4. Tap the play button"
-          echo ""
-          echo "--- INFO ---"
-          echo "  Runtime: 6 hours max"
-          echo "  Protocol: VLESS + WebSocket + TLS"
-          echo "  Tunnels: Cloudflare Quick Tunnels (no setup needed)"
-          echo ""
-          echo "================================================================"
-
-      - name: Monitor
-        run: |
-          echo "Monitoring tunnels for 6 hours..."
           
-          for i in {1..2160}; do
-            # Check if Xray is running
-            if ! sudo ss -tlnp | grep -q ":8081"; then
+          while true; do
+            sleep 300
+            
+            # Check Xray
+            if ! pgrep -x "xray" > /dev/null; then
               echo "Xray died, restarting..."
-              cd /tmp/xray
-              sudo nohup xray run -c config.json > xray.log 2>&1 &
+              nohup xray run -c /tmp/xray/config.json > /tmp/xray/xray.log 2>&1 &
+              sleep 3
+            fi
+            
+            # Check cloudflared
+            if ! pgrep -x "cloudflared" > /dev/null; then
+              echo "Cloudflared died, restarting..."
+              if [ "$TUNNEL_MODE" = "quick" ]; then
+                nohup cloudflared tunnel --no-autoupdate --url http://localhost:8080 --logfile /tmp/tunnel/cloudflared.log > /tmp/tunnel/tunnel_url.log 2>&1 &
+                sleep 15
+                NEW_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/tunnel/cloudflared.log 2>/dev/null | tail -1)
+                if [ -n "$NEW_URL" ]; then
+                  HOSTNAME=$(echo "$NEW_URL" | sed 's|https://||')
+                  ENCODED_PATH=$(echo "$XHTTP_PATH" | sed 's|/|%2F|g')
+                  echo ""
+                  echo "NEW TUNNEL URL:"
+                  echo "vless://$UUID@$HOSTNAME:443?encryption=none&security=tls&sni=$HOSTNAME&type=xhttp&path=$ENCODED_PATH#VLESS-XHTTP-CF"
+                  echo ""
+                fi
+              else
+                nohup cloudflared tunnel --no-autoupdate run --token "$CF_TUNNEL_TOKEN" > /tmp/tunnel/cloudflared.log 2>&1 &
+              fi
               sleep 5
             fi
             
-            # Check PC tunnel
-            if ! ps -p $CF_PC_PID > /dev/null 2>&1; then
-              echo "Restarting PC tunnel..."
-              nohup cloudflared tunnel --url http://localhost:8081 --no-autoupdate > /tmp/cf-pc.log 2>&1 &
-              CF_PC_PID=$!
-              sleep 15
-              NEW_PC_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-pc.log | head -1)
-              if [ -n "$NEW_PC_URL" ]; then
-                NEW_PC_HOST=$(echo "$NEW_PC_URL" | sed 's|https://||')
-                echo "New PC URL: $NEW_PC_URL"
-                echo "New PC VLESS: vless://${UUID_PC}@${NEW_PC_HOST}:443?encryption=none&security=tls&sni=${NEW_PC_HOST}&fp=chrome&type=ws&host=${NEW_PC_HOST}&path=%2Fpc#Iran-PC"
-              fi
-            fi
-            
-            # Check Android tunnel
-            if ! ps -p $CF_ANDROID_PID > /dev/null 2>&1; then
-              echo "Restarting Android tunnel..."
-              nohup cloudflared tunnel --url http://localhost:8082 --no-autoupdate > /tmp/cf-android.log 2>&1 &
-              CF_ANDROID_PID=$!
-              sleep 15
-              NEW_ANDROID_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-android.log | head -1)
-              if [ -n "$NEW_ANDROID_URL" ]; then
-                NEW_ANDROID_HOST=$(echo "$NEW_ANDROID_URL" | sed 's|https://||')
-                echo "New Android URL: $NEW_ANDROID_URL"
-                echo "New Android VLESS: vless://${UUID_ANDROID}@${NEW_ANDROID_HOST}:443?encryption=none&security=tls&sni=${NEW_ANDROID_HOST}&fp=firefox&type=ws&host=${NEW_ANDROID_HOST}&path=%2Fandroid#Iran-Android"
-              fi
-            fi
-            
-            [ $((i % 60)) -eq 0 ] && echo "[$(date '+%H:%M:%S')] Running | $((i * 10 / 60))min elapsed"
-            sleep 10
+            echo "$(date): Services running OK"
           done
-
-      - name: Cleanup
-        if: always()
-        run: |
-          sudo pkill -f xray || true
-          kill $CF_PC_PID 2>/dev/null || true
-          kill $CF_ANDROID_PID 2>/dev/null || true
-          echo "Cleanup complete"
